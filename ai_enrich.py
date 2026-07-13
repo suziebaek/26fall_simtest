@@ -21,7 +21,8 @@ import json
 import re
 from anthropic import Anthropic
 
-MODEL_ID = "claude-sonnet-5"  # 필요 시 앱에서 override 가능
+MODEL_ID = "claude-sonnet-5"  # Anthropic 기본 모델 (필요 시 앱에서 override 가능)
+GEMINI_MODEL_ID = "gemini-2.5-flash"  # Gemini 무료 티어 기본 모델 (필요 시 앱에서 override 가능)
 
 BASE_RULES = """당신은 한국 중고등 영어 내신/서술형 문제은행 데이터를 정해진 엑셀 스키마로 정리하는 어시스턴트입니다.
 아래 [일반 규칙]과 [이 데이터셋의 실제 예시 행(few-shot)]을 참고해서, 요청된 JSON 키만 정확히 채워 출력하세요.
@@ -57,6 +58,15 @@ ANSWER_SOLVE_NOTE = """
 이 문서에는 정답이 별도로 표시되어 있지 않습니다. 문제를 직접 정확히 풀어서 정답을 판단한 뒤
 Answer 필드를 규칙에 맞게 채우세요. 신중하게 검토하고, 확신이 서지 않으면 가장 근거가 명확한
 답을 선택하세요."""
+
+ANSWER_KEY_NOTE_TEMPLATE = """
+[정답/난이도 - 정답지에서 이미 확정됨]
+이 문항의 정답(Answer)과 난이도(difficulty)는 별도 정답지 파일에서 이미 확정되었습니다.
+아래 값을 그대로 사용하세요 (다시 풀거나 판단할 필요 없습니다. 응답에도 이 값 그대로 채우세요):
+- 난이도: {difficulty}
+- 정답: {answer}
+아래 해설은 cell_id/q_type/tp_type 등 다른 필드를 판단할 때 참고만 하세요 (출력 필드에는 포함하지 않음):
+{explanation}"""
 
 DEFAULT_FEW_SHOT = """[예시 1 - 객관식]
 지문: Many people think money brings happiness, but research shows the opposite...
@@ -111,13 +121,21 @@ def _build_system_prompt(output_fields, level):
     )
 
 
-def _build_user_prompt(raw_q, cell_candidates):
+def _build_user_prompt(raw_q, cell_candidates, answer_key_entry=None):
     cand_lines = "\n".join(f"  - {cid}: {title}" for cid, title in cell_candidates) or "  (후보 없음 - 자유 판단)"
     passage = "\n".join(raw_q.get("raw_lines", []))
     options = "\n".join(raw_q.get("options", []))
     tables = "\n---\n".join(raw_q.get("tables", []))
     instruction = raw_q.get("instruction") or raw_q.get("shared_instruction") or ""
     answer_marks = " | ".join(raw_q.get("answer_marks", []))
+
+    answer_key_block = ""
+    if answer_key_entry:
+        answer_key_block = "\n\n" + ANSWER_KEY_NOTE_TEMPLATE.format(
+            difficulty=answer_key_entry.get("difficulty", ""),
+            answer=answer_key_entry.get("answer", ""),
+            explanation=answer_key_entry.get("explanation", "") or "(해설 없음)",
+        )
 
     return f"""[이 챕터의 CELL 후보 - 후보가 있으면 이 중에서만 선택]
 {cand_lines}
@@ -135,37 +153,66 @@ def _build_user_prompt(raw_q, cell_candidates):
 {tables}
 
 [원문에서 빨간색으로 표시된 텍스트 - 있으면 정답 표시, 없으면 빈 상태]
-{answer_marks}
+{answer_marks}{answer_key_block}
 
 위 정보를 바탕으로 스키마 규칙에 맞는 JSON 하나만 출력하세요."""
 
 
-def enrich_question(
-    client: Anthropic,
-    raw_q: dict,
-    cell_candidates: list,
-    output_fields: list = None,
-    few_shot_text: str = None,
-    level: str = "H",
-    model: str = MODEL_ID,
-) -> dict:
-    """단일 문항을 AI로 채워서 최종 스키마 dict 반환.
-    output_fields: 채워야 할 JSON 키 목록 (샘플 엑셀의 '문항별' 컬럼 목록). 없으면 기본값 사용.
-    few_shot_text: 샘플 엑셀 실제 행에서 뽑은 few-shot 텍스트. 없으면 기본 하드코딩 예시 사용.
-    level: "H" (정답이 빨간색으로 표시됨) 또는 "E" (정답 표시 없음, AI가 직접 풀어야 함)
+def _call_model(provider: str, client, model: str, system_prompt: str, user_prompt: str) -> str:
+    """provider("anthropic" 또는 "gemini")에 맞는 클라이언트로 모델을 호출하고
+    응답 텍스트를 반환한다. client는 각 provider에 맞는 클라이언트 인스턴스여야 함:
+      - anthropic: anthropic.Anthropic(api_key=...)
+      - gemini:    google.genai.Client(api_key=...)  (무료 API, google-genai 패키지)
     """
-    output_fields = output_fields or DEFAULT_OUTPUT_FIELDS
-    few_shot_text = few_shot_text or DEFAULT_FEW_SHOT
-    system_prompt = _build_system_prompt(output_fields, level)
-    user_prompt = few_shot_text + "\n\n" + _build_user_prompt(raw_q, cell_candidates)
+    if provider == "gemini":
+        from google.genai import types  # 지연 임포트: anthropic만 쓰는 경우 의존성 불필요
+
+        resp = client.models.generate_content(
+            model=model,
+            contents=user_prompt,
+            config=types.GenerateContentConfig(
+                system_instruction=system_prompt,
+                max_output_tokens=2000,
+            ),
+        )
+        return (resp.text or "").strip()
+
+    # 기본값: anthropic
     resp = client.messages.create(
         model=model,
         max_tokens=1500,
         system=system_prompt,
         messages=[{"role": "user", "content": user_prompt}],
     )
-    text = "".join(b.text for b in resp.content if getattr(b, "type", None) == "text")
-    text = text.strip()
+    return "".join(b.text for b in resp.content if getattr(b, "type", None) == "text").strip()
+
+
+def enrich_question(
+    client,
+    raw_q: dict,
+    cell_candidates: list,
+    output_fields: list = None,
+    few_shot_text: str = None,
+    level: str = "H",
+    model: str = MODEL_ID,
+    provider: str = "anthropic",
+    answer_key_entry: dict = None,
+) -> dict:
+    """단일 문항을 AI로 채워서 최종 스키마 dict 반환.
+    output_fields: 채워야 할 JSON 키 목록 (샘플 엑셀의 '문항별' 컬럼 목록). 없으면 기본값 사용.
+    few_shot_text: 샘플 엑셀 실제 행에서 뽑은 few-shot 텍스트. 없으면 기본 하드코딩 예시 사용.
+    level: "H" (정답이 빨간색으로 표시됨) 또는 "E" (정답 표시 없음, AI가 직접 풀어야 함)
+    provider: "anthropic"(유료) 또는 "gemini"(무료 API)
+    answer_key_entry: {"difficulty","answer","explanation"} - 정답지에 이 문항이 있으면 전달.
+      있으면 AI에게 정답/난이도를 그대로 쓰라고 안내하고, 응답을 받은 뒤에도 해당 값으로
+      한 번 더 덮어써서 AI가 재해석하지 못하게 한다.
+    """
+    output_fields = output_fields or DEFAULT_OUTPUT_FIELDS
+    few_shot_text = few_shot_text or DEFAULT_FEW_SHOT
+    system_prompt = _build_system_prompt(output_fields, level)
+    user_prompt = few_shot_text + "\n\n" + _build_user_prompt(raw_q, cell_candidates, answer_key_entry)
+
+    text = _call_model(provider, client, model, system_prompt, user_prompt)
     text = re.sub(r"^```(json)?", "", text).strip()
     text = re.sub(r"```$", "", text).strip()
     try:
@@ -175,31 +222,45 @@ def enrich_question(
         if not m:
             raise
         data = json.loads(m.group(0))
+
+    if answer_key_entry:
+        if answer_key_entry.get("difficulty"):
+            data["difficulty"] = answer_key_entry["difficulty"]
+        if answer_key_entry.get("answer"):
+            data["Answer"] = answer_key_entry["answer"]
+
     return data
 
 
 def enrich_all(
-    client: Anthropic,
+    client,
     raw_questions: list,
     cell_candidates_by_chapter: dict,
     output_fields: list = None,
     few_shot_text: str = None,
     level: str = "H",
     model: str = MODEL_ID,
+    provider: str = "anthropic",
+    answer_key: dict = None,
     progress_cb=None,
 ):
     """raw_questions 전체를 순회하며 enrich.
     cell_candidates_by_chapter: {chapter_num: [(cell_id, cell_title), ...]}
+    answer_key: {chapter_num: {q_num: {"difficulty","answer","explanation"}}} (answer_key.load_answer_key 결과).
+      해당 문항이 있으면 정답/난이도를 정답지 값으로 채우고 AI에게는 참고자료로만 제공.
     """
     results = []
     total = len(raw_questions)
+    answer_key = answer_key or {}
     for idx, rq in enumerate(raw_questions):
         ch = rq.get("chapter_num")
         cand = cell_candidates_by_chapter.get(ch, [])
+        answer_key_entry = answer_key.get(ch, {}).get(rq.get("q_num"))
         data = enrich_question(
             client, rq, cand,
             output_fields=output_fields, few_shot_text=few_shot_text,
-            level=level, model=model,
+            level=level, model=model, provider=provider,
+            answer_key_entry=answer_key_entry,
         )
         data["chapter_num"] = ch
         data["q_num"] = rq.get("q_num")

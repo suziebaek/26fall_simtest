@@ -9,10 +9,11 @@ from anthropic import Anthropic
 
 from doc_parser import parse_chapter_reference, parse_question_bank
 from ai_enrich import (
-    enrich_all, MODEL_ID, DEFAULT_OUTPUT_FIELDS,
+    enrich_all, MODEL_ID, GEMINI_MODEL_ID, DEFAULT_OUTPUT_FIELDS,
     build_candidates_for_all_chapters,
 )
 from sample_xlsx import load_sample, build_few_shot_from_samples, extract_chapter_cells_from_sample
+from answer_key import load_answer_key, count_entries
 
 st.set_page_config(page_title="문제은행 자동 변환기", layout="wide")
 
@@ -37,6 +38,7 @@ for key, default in [
     ("raw_questions", None),
     ("enriched", None),
     ("lesson_meta_by_level", {}),
+    ("answer_key", {}),
 ]:
     if key not in st.session_state:
         st.session_state[key] = default
@@ -134,16 +136,42 @@ with st.sidebar:
         st.success(f"{level} 설정을 저장했습니다. 다음에 {level}을 선택하면 자동으로 불러옵니다.")
 
     st.divider()
-    st.subheader("Claude API")
-    try:
-        default_key = st.secrets.get("ANTHROPIC_API_KEY", "")
-    except Exception:
-        default_key = ""
-    api_key = st.text_input(
-        "Anthropic API Key", value=default_key, type="password",
-        help="st.secrets['ANTHROPIC_API_KEY']로도 설정 가능합니다 (.streamlit/secrets.toml).",
+    st.subheader("AI 제공자")
+    provider_label = st.radio(
+        "AI 모델 제공자",
+        ["Claude (Anthropic, 유료)", "Gemini (Google, 무료 API)"],
+        horizontal=True,
+        help="정답지가 이미 채워진 문항은 어느 제공자를 쓰든 정답/난이도는 AI가 아니라 정답지 값을 그대로 씁니다.",
     )
-    model = st.text_input("모델", value=MODEL_ID)
+    provider = "anthropic" if provider_label.startswith("Claude") else "gemini"
+
+    if provider == "anthropic":
+        try:
+            default_key = st.secrets.get("ANTHROPIC_API_KEY", "")
+        except Exception:
+            default_key = ""
+        api_key = st.text_input(
+            "Anthropic API Key", value=default_key, type="password",
+            help="st.secrets['ANTHROPIC_API_KEY']로도 설정 가능합니다 (.streamlit/secrets.toml).",
+        )
+        model = st.text_input("모델", value=MODEL_ID)
+    else:
+        try:
+            default_key = st.secrets.get("GEMINI_API_KEY", "")
+        except Exception:
+            default_key = ""
+        api_key = st.text_input(
+            "Gemini API Key", value=default_key, type="password",
+            help=(
+                "Google AI Studio(aistudio.google.com)에서 무료로 발급받을 수 있습니다. "
+                "st.secrets['GEMINI_API_KEY']로도 설정 가능합니다 (.streamlit/secrets.toml)."
+            ),
+        )
+        model = st.text_input(
+            "모델", value=GEMINI_MODEL_ID,
+            help="무료 티어 예: gemini-2.5-flash (권장), gemini-2.5-flash-lite 등. "
+                 "무료 티어는 분당/일일 요청 수 제한이 있어 문항이 많으면 처리 중 잠시 멈출 수 있습니다.",
+        )
 
 # ================= STEP 2: 문제 문서 업로드 (유일한 필수 업로드) =================
 st.header("2️⃣ 문제 문서 업로드")
@@ -179,14 +207,64 @@ if st.session_state.raw_questions:
         st.dataframe(pd.DataFrame(preview_rows), width='stretch', height=350)
         st.caption("⚠️ 파싱은 휴리스틱입니다. H레벨인데 정답 표시가 비어있다면 원본 문서의 빨간색 서식을 확인해주세요.")
 
+st.divider()
+st.subheader("📑 정답지 엑셀 업로드 (선택)")
+st.caption(
+    "챕터/문항번호별로 난이도·정답·해설이 이미 정리된 정답지 엑셀이 있으면 올려주세요. "
+    "일치하는 문항은 AI가 다시 풀지 않고 정답지의 정답/난이도를 그대로 사용합니다 "
+    "(해설은 다른 필드 판단에 참고자료로만 쓰이고, 출력에는 포함되지 않습니다). "
+    "형식: 학기 | 교재명 | Chapter | 문제 | 난이도 | 정답 | 해설 (열 순서 무관, 이 이름들만 있으면 인식)"
+)
+answer_key_file = st.file_uploader("정답지 엑셀 (.xlsx, 선택)", type=["xlsx"], key="answer_key_upload")
+if answer_key_file is not None:
+    with open("_answer_key_tmp.xlsx", "wb") as f:
+        f.write(answer_key_file.read())
+    try:
+        parsed_key = load_answer_key("_answer_key_tmp.xlsx")
+        n = count_entries(parsed_key)
+        if n == 0:
+            st.warning(
+                "정답지에서 인식된 문항이 없습니다. 헤더 행에 'Chapter', '문제', '난이도', '정답' 컬럼명이 "
+                "정확히 있는지 확인해주세요."
+            )
+        else:
+            st.session_state.answer_key = parsed_key
+            st.success(f"정답지에서 {n}개 문항의 정답/난이도를 읽었습니다 (챕터: {sorted(parsed_key.keys())}).")
+    except Exception as e:
+        st.error(f"정답지 파싱 중 오류: {e}")
+
+if st.session_state.answer_key:
+    with st.expander(f"📑 인식된 정답지 미리보기 ({count_entries(st.session_state.answer_key)}개 문항)"):
+        key_rows = []
+        for ch, qs in sorted(st.session_state.answer_key.items()):
+            for qn, v in sorted(qs.items()):
+                key_rows.append({"chapter": ch, "q_num": qn, **v})
+        st.dataframe(pd.DataFrame(key_rows), width='stretch', height=250)
+        if st.button("🗑️ 정답지 제거 (다시 AI로 정답/난이도 판단)"):
+            st.session_state.answer_key = {}
+            st.rerun()
+
 # ================= STEP 3: AI 자동 채우기 =================
 st.header("3️⃣ AI로 자동 채우기")
 if st.session_state.raw_questions:
     if st.button("🤖 AI 자동 채우기 실행", type="primary"):
         if not api_key:
-            st.error("사이드바에 Anthropic API Key를 입력해주세요.")
+            provider_name = "Anthropic" if provider == "anthropic" else "Gemini"
+            st.error(f"사이드바에 {provider_name} API Key를 입력해주세요.")
         else:
-            client = Anthropic(api_key=api_key)
+            try:
+                if provider == "anthropic":
+                    client = Anthropic(api_key=api_key)
+                else:
+                    from google import genai
+                    client = genai.Client(api_key=api_key)
+            except ImportError:
+                st.error(
+                    "Gemini(google-genai) 패키지가 설치되어 있지 않습니다. "
+                    "requirements.txt에 'google-genai'를 추가했는지 확인해주세요."
+                )
+                st.stop()
+
             progress = st.progress(0.0, text="시작...")
 
             def cb(done, total):
@@ -201,6 +279,8 @@ if st.session_state.raw_questions:
                     few_shot_text=DEFAULT_FEWSHOT_TEXT,
                     level=level_code,
                     model=model,
+                    provider=provider,
+                    answer_key=st.session_state.answer_key,
                     progress_cb=cb,
                 )
                 st.session_state.enriched = results
