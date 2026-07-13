@@ -19,6 +19,7 @@ st.set_page_config(page_title="문제은행 자동 변환기", layout="wide")
 
 RESOURCES_DIR = "resources"
 H_CHAPTER_REF = os.path.join(RESOURCES_DIR, "H_chapter_ref.docx")
+E_CHAPTER_REF = os.path.join(RESOURCES_DIR, "E_chapter_ref.docx")
 H_SAMPLE = os.path.join(RESOURCES_DIR, "H_sample.xlsx")   # 공식 원고템플릿 (스키마 기준)
 E_SAMPLE = os.path.join(RESOURCES_DIR, "E_sample.xlsx")   # E레벨 템플릿 (H와 동일 스키마, level_code/cell_id만 E)
 
@@ -31,6 +32,11 @@ def _load_sample_cached(path):
 @st.cache_data
 def _load_h_chapter_ref():
     return parse_chapter_reference(H_CHAPTER_REF)
+
+
+@st.cache_data
+def _load_e_chapter_ref():
+    return parse_chapter_reference(E_CHAPTER_REF)
 
 
 # ---------- 세션 상태 초기화 ----------
@@ -75,18 +81,28 @@ if level_code == "H":
     candidates_by_chapter = build_candidates_for_all_chapters(chapter_ref, CELL_ID_TEMPLATE)
     default_chapter_num = 1
 else:
-    st.warning(
-        "E레벨: 전용 챕터/CELL 참고문서가 아직 없어서, 내장된 E 템플릿에서 챕터1의 cell_id/cell_title만 "
-        "자동 추출해 후보로 사용합니다 (스키마와 level_code/cell_id 접두사는 H와 동일한 규칙으로 E에 맞게 "
-        "이미 반영되어 있습니다). 다른 챕터를 다루거나 더 정확한 매핑이 필요하면 아래 "
-        "'고급 설정'에서 챕터 참고문서를 직접 올릴 수 있습니다.\n\n"
-        "또한 E레벨 원문에는 정답이 표시되어 있지 않아, AI가 문제를 직접 풀어 정답을 판단합니다 — "
-        "검수 단계에서 각별히 확인해주세요."
-    )
-    e_chapter_num, e_cells = extract_chapter_cells_from_sample(level_sample)
-    chapter_ref = {}
-    candidates_by_chapter = {e_chapter_num: e_cells} if e_chapter_num else {}
-    default_chapter_num = e_chapter_num or 1
+    if os.path.exists(E_CHAPTER_REF):
+        st.success(
+            "E레벨: 챕터/CELL 참고문서(9개 챕터)가 내장되어 있습니다. 문제 문서만 올리면 됩니다.\n\n"
+            "다만 E레벨 원문에는 정답이 표시되어 있지 않아, AI가 문제를 직접 풀어 정답을 판단합니다 — "
+            "검수 단계에서 각별히 확인해주세요."
+        )
+        chapter_ref = _load_e_chapter_ref()
+        candidates_by_chapter = build_candidates_for_all_chapters(chapter_ref, CELL_ID_TEMPLATE)
+        default_chapter_num = 1
+    else:
+        st.warning(
+            "E레벨: 전용 챕터/CELL 참고문서가 아직 없어서, 내장된 E 템플릿에서 챕터1의 cell_id/cell_title만 "
+            "자동 추출해 후보로 사용합니다 (스키마와 level_code/cell_id 접두사는 H와 동일한 규칙으로 E에 맞게 "
+            "이미 반영되어 있습니다). 다른 챕터를 다루거나 더 정확한 매핑이 필요하면 아래 "
+            "'고급 설정'에서 챕터 참고문서를 직접 올릴 수 있습니다.\n\n"
+            "또한 E레벨 원문에는 정답이 표시되어 있지 않아, AI가 문제를 직접 풀어 정답을 판단합니다 — "
+            "검수 단계에서 각별히 확인해주세요."
+        )
+        e_chapter_num, e_cells = extract_chapter_cells_from_sample(level_sample)
+        chapter_ref = {}
+        candidates_by_chapter = {e_chapter_num: e_cells} if e_chapter_num else {}
+        default_chapter_num = e_chapter_num or 1
 
 with st.expander("⚙️ 고급 설정 (필요할 때만) — 스키마/챕터자료 직접 교체, 챕터 번호 지정"):
     st.write("**챕터 번호**: 업로드하는 문서에 'Chapter' 헤더가 없는 단일 챕터 문서일 경우 사용할 기본값")
