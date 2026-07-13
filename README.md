@@ -1,8 +1,7 @@
 # 워드 문제 → 엑셀 문제은행 자동 변환기
 
-문제모음집(.docx, 정답은 빨간 글씨)과 챕터/CELL 참고문서(.docx)를 업로드하면,
-Claude API가 난이도 · 해설 · cell_id/cell_title · Answer 포맷 등을 자동으로 채워
-타겟 엑셀 스키마(H레벨 25개 컬럼)로 변환해주는 Streamlit 앱입니다.
+**문제 문서 하나만 업로드**하면, 내장된 공식 스키마(원고템플릿)와 챕터/CELL
+참고자료를 자동 적용해서 타겟 엑셀 포맷으로 변환해주는 Streamlit 앱입니다.
 
 ## 설치 및 실행
 
@@ -11,57 +10,82 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-브라우저가 자동으로 열리고 `http://localhost:8501` 에서 앱을 사용할 수 있습니다.
-
 ## API 키 설정 (둘 중 하나)
 
-1. 앱 실행 후 왼쪽 사이드바에 직접 입력 (가장 간단)
-2. `.streamlit/secrets.toml` 파일 생성:
+1. 앱 실행 후 왼쪽 사이드바에 직접 입력
+2. `.streamlit/secrets.toml`:
    ```toml
    ANTHROPIC_API_KEY = "sk-ant-..."
    ```
 
+## 스키마 (내장 · 두 레벨 공용)
+
+`resources/H_sample.xlsx` (공식 원고템플릿, `RP_H_AU_Test_G_L01_원고템플릿.xlsx`)을
+기준으로 아래 26개 컬럼을 사용합니다. **`explanation`(해설) 컬럼은 없습니다.**
+
+```
+service_code, track_code, top_cors_id, component_code, book_code, act_code,
+level_code, lesson_order_seq, lesson_title, page_order_seq, cell_id, cell_title,
+q_type, tp_type, difficulty, text_passage, image_passage, question, text_prompt,
+image_prompt, text_example_1~5, Answer
+```
+
+필드 관례:
+- `text_passage`: 순수 독해 지문/대화문만. **밑줄 어법오류 지문은 여기 안 들어감.**
+- `text_prompt`: 어법오류 밑줄 지문, `<보기>`, `<조건>`, 우리말 해석 등 보조 텍스트.
+- `image_passage` / `image_prompt`: 지문 또는 표를 이미지로 대체해야 할 때의 파일명.
+- `Answer`: 유형별 표기(예: 객관식 `"2"`, 복수정답 `"2,4"`, 단어배열 `{a/b/c/.}`,
+  빈칸 `{ans}`, 어법수정 `기호: {(a)} 수정 후: {..}`) — `ai_enrich.py`의 few-shot과
+  `resources/H_sample.xlsx` 실제 행을 참고해 AI가 그대로 학습합니다.
+
+## 레벨별 차이
+
+| 항목 | H레벨 | E레벨 |
+|---|---|---|
+| 스키마(컬럼 구성) | 26개 컬럼 | **H와 완전히 동일** |
+| 공통 메타데이터 | `level_code=TO_G_H_AU`, `cell_id` 접두사 `GR-H-CH..` | `level_code=TO_G_E_AU`, `cell_id` 접두사 `GR-E-CH..` (레벨 식별자만 치환) |
+| 챕터/CELL 참고문서 | `resources/H_chapter_ref.docx` 내장 (9개 챕터 전체) | 없음 — `resources/E_sample.xlsx`에서 챕터1의 cell_id/cell_title만 자동 추출해 사용 |
+| 정답 표시 | 문서에 **빨간 글씨**로 정답이 이미 표시되어 있음 → AI는 그대로 옮겨 포맷팅만 함 | 문서에 정답 표시가 **없음** → AI가 문제를 **직접 풀어서** 정답을 판단 (검수 필수) |
+| 챕터 범위 | 한 파일에 여러 챕터가 있어도 `Chapter` 헤더로 자동 구분 | 보통 한 파일 = 한 챕터 (챕터 헤더 없어도 '고급 설정'에서 지정한 챕터 번호로 처리) |
+
+`resources/E_sample.xlsx`는 H 공식템플릿과 동일한 26개 컬럼 구조로 재구성했고,
+`level_code`/`cell_id`만 H→E로 치환해 생성했습니다 (원본 E 참고자료에 있던
+`explanation` 컬럼 등 스키마 차이는 모두 제거됨). E레벨도 스키마 자체는 H와
+동일하다고 확인됨. 다만 전용 챕터참고문서가 아직 없으므로, 여러 챕터를 다루게
+되면 **고급 설정에서 챕터/CELL 참고문서(.docx, H와 동일한 `CHAPTER 0N 제목` /
+`CELL n 제목` 형식)를 올려주시면 정확도가 올라갑니다.**
+
 ## 사용 순서
 
-1. **챕터/CELL 참고문서 업로드** — `CHAPTER 0N 제목` / `CELL n 제목` 형식의 문서
-   (예: `FG_H_챕터.docx`). 이 문서를 기준으로 각 챕터별 3개 CELL 후보가 만들어지고,
-   AI가 이 후보 중에서만 cell_id/cell_title을 선택합니다.
-2. **문제모음집 업로드** — 문항 번호(01, 02...), 보기(①~⑤), 빨간 글씨 정답이 있는
-   워드 문서 (예: `FG_H_Sim_Test.docx`). 챕터 헤더는 `Chapter` 문단 다음에
-   `01  동사의 종류`처럼 번호+제목이 오는 형식을 인식합니다.
-3. **(선택) 해설/난이도 문서** — 현재는 업로드만 받아두고 실제 매칭 파서는 아직
-   미구현 상태입니다 (문서 형식이 정해지는 대로 `app.py`의 3단계 로직을 추가
-   구현하면 됩니다). 지금은 AI가 해설/난이도를 직접 생성합니다.
-4. **AI 자동 채우기 실행** — 문항 하나하나를 Claude API에 보내 q_type/tp_type/
-   difficulty/explanation/cell_id/cell_title/Answer 포맷 등을 채웁니다.
-5. **검수 및 편집** — 표 형태로 결과를 보여주며, 셀을 직접 더블클릭해서 수정할 수
-   있습니다 (자동 파싱·AI 생성은 100% 정확하지 않으므로 검수 필수).
-6. **엑셀 다운로드** — 최종 결과를 타겟 스키마 그대로 `.xlsx`로 내보냅니다.
+1. **레벨 선택** — H레벨 / E레벨 라디오 버튼
+2. **(선택) 고급 설정** — 챕터 번호 지정, 챕터참고문서/스키마 엑셀 직접 교체
+3. **문제 문서 업로드** — 유일한 필수 업로드. `.docx` 파일 하나
+4. **AI 자동 채우기 실행** — Claude API 호출 (사이드바에 API 키 필요)
+5. **검수 및 편집** — 표에서 직접 수정 가능 (특히 E레벨은 AI가 스스로 정답을
+   판단하므로 꼼꼼히 확인 권장)
+6. **엑셀 다운로드**
 
 ## 파일 구성
 
 | 파일 | 역할 |
 |---|---|
 | `app.py` | Streamlit UI 메인 |
-| `doc_parser.py` | 워드 문서 파싱 (챕터/CELL 목차, 문제모음집 + 빨간색 정답 감지) |
-| `ai_enrich.py` | Claude API 프롬프트 및 스키마 매핑 로직 |
-| `lesson_meta.json` | 사이드바에서 "저장" 누르면 생성되는 공통 메타데이터 캐시 |
+| `doc_parser.py` | 워드 문서 파싱 (챕터/CELL 목차, 문제모음집 + 빨간색 정답 감지, 챕터헤더 없는 단일챕터 문서도 지원) |
+| `sample_xlsx.py` | 샘플 엑셀에서 스키마/공통메타/few-shot/챕터-셀 후보 추출 |
+| `ai_enrich.py` | Claude API 프롬프트 및 스키마 매핑 로직 (레벨별 정답판단 방식 분기) |
+| `resources/H_chapter_ref.docx` | H레벨 9개 챕터 × 3개 CELL 참고문서 (내장) |
+| `resources/H_sample.xlsx` | 공식 원고템플릿 — 스키마/포맷 기준 (내장, 두 레벨 공용) |
+| `resources/H_guide.xlsx` | 원고 작성 가이드 (참고용) |
+| `resources/E_sample.xlsx` | E레벨 챕터1 cell_id/cell_title 추출용 (내장) |
+| `lesson_meta.json` | 사이드바 "저장" 시 생성되는 공통 메타데이터 캐시 |
 
-## 알려진 한계 (휴리스틱 파서이므로 검수 필요)
+## 알려진 한계
 
 - 문항 경계 인식은 "두 자리 이하 숫자로 시작하는 문단"을 기준으로 하므로,
   본문 안에 우연히 숫자로 시작하는 줄이 있으면 오탐할 수 있습니다.
-- 표(테이블) 형태 지문은 원문 그대로 텍스트로 보존되며, 실제 서비스에서
-  이미지로 대체해야 하는 경우 `image_promt` 필드를 검수 단계에서 직접 채워야
-  합니다.
 - 빨간색 판정은 `EE0000`/`FF0000` 계열 hex 색상을 기준으로 하며, 문서마다
   강조 색상이 다르면 `doc_parser.py`의 `RED_HEXES`/`_is_red()`를 조정하세요.
-- Answer 필드의 정확한 포맷(예: `{단어1/단어2/.}`, `(A):{..} (B):{..}`,
-  `기호: {(a)} 수정 후: {..}`)은 AI가 few-shot 예시를 보고 흉내내는 방식이라
-  드물게 형식을 놓칠 수 있습니다 — 5단계 검수에서 반드시 확인하세요.
-
-## E레벨 확장
-
-E레벨도 동일한 파이프라인을 쓸 수 있습니다. E레벨 챕터/CELL 참고문서와
-문제모음집을 준비해 같은 방식으로 업로드하면 됩니다 (컬럼 스키마가 다르면
-`app.py`의 `TARGET_COLUMNS`를 E레벨 샘플 엑셀 헤더에 맞춰 조정하세요).
+- E레벨은 AI가 직접 정답을 판단하므로 H레벨보다 오류 가능성이 높습니다 —
+  검수 단계를 건너뛰지 마세요.
+- `image_passage`/`image_prompt`에 제안된 파일명은 실제 이미지 생성 여부와
+  무관한 "제안"일 뿐이며, 실제 이미지 제작/업로드는 별도 프로세스가 필요합니다.

@@ -104,9 +104,13 @@ QRANGE_RE = re.compile(r"^\[(\d{1,2})-(\d{1,2})\]\s*(.*)$")
 CHAPTER_MARK_RE = re.compile(r"^(\d{2})\s+(.+)$")
 
 
-def parse_question_bank(path):
+def parse_question_bank(path, default_chapter_num=1, default_chapter_title=""):
     """
     문제모음집 워드 문서를 파싱해서 챕터별 문항 리스트를 반환.
+    default_chapter_num/default_chapter_title: 문서 안에 'Chapter' 헤더가 전혀
+    없는 단일 챕터 문서(예: E레벨처럼 챕터 하나만 다루는 문제집)를 위한 기본값.
+    문서 안에 'Chapter' 헤더가 실제로 나오면 그 값으로 자동 갱신됨(H레벨처럼
+    여러 챕터를 한 파일에 담은 경우).
     반환: list of dict, 각 dict:
       {
         "chapter_num": int,
@@ -126,8 +130,8 @@ def parse_question_bank(path):
     items = list(_iter_block_items(doc))
 
     questions = []
-    cur_chapter_num = None
-    cur_chapter_title = None
+    cur_chapter_num = default_chapter_num
+    cur_chapter_title = default_chapter_title
     expecting_chapter_title = False
 
     cur_q = None
