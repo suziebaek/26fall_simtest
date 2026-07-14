@@ -210,6 +210,25 @@ def _iter_block_items(doc):
             yield "tbl", Table(child, doc)
 
 
+def _table_looks_like_options(html_text):
+    """표 전체가 사실은 지문이 아니라 보기(①~⑤) 목록인 경우를 감지
+    (지문 없이 표 안에 선지가 바로 들어있는 케이스)."""
+    plain = _KNOWN_TAG_RE.sub("", html_text)
+    if not any(c in plain for c in CIRCLED):
+        return False
+    return _looks_like_options_line(html_text)
+
+
+def _split_into_options(html_text):
+    parts = re.split(r"(?=[①②③④⑤⑥⑦⑧⑨⑩])", html_text)
+    cleaned = []
+    for part in parts:
+        part = re.sub(r"(<br/>)+$", "", part).strip()
+        if part:
+            cleaned.append(part)
+    return cleaned
+
+
 QNUM_RE = re.compile(r"^(\d{1,2})(?:\s+(.*))?$")
 QRANGE_RE = re.compile(r"^\[(\d{1,2})-(\d{1,2})\]\s*(.*)$")
 CHAPTER_MARK_RE = re.compile(r"^(\d{2})\s+(.+)$")
@@ -270,12 +289,16 @@ def parse_question_bank(path, default_chapter_num=1, default_chapter_title=""):
         if kind == "tbl":
             html = _table_to_html(obj)
             if html:
-                is_cond = _is_condition_block(html)
-                if cur_q is not None:
-                    (cur_q["prompt_tables"] if is_cond else cur_q["passage_tables"]).append(html)
-                elif gathering_shared:
-                    (shared_prompt_tables if is_cond else shared_passage_tables).append(html)
-                # 그 외(문항/그룹 문맥 밖의 표: 목차 등)는 무시
+                if cur_q is not None and not cur_q["options"] and _table_looks_like_options(html):
+                    # 지문 없이 표 안에 선지(①~⑤)가 바로 들어있는 경우
+                    cur_q["options"].extend(_split_into_options(html))
+                else:
+                    is_cond = _is_condition_block(html)
+                    if cur_q is not None:
+                        (cur_q["prompt_tables"] if is_cond else cur_q["passage_tables"]).append(html)
+                    elif gathering_shared:
+                        (shared_prompt_tables if is_cond else shared_passage_tables).append(html)
+                    # 그 외(문항/그룹 문맥 밖의 표: 목차 등)는 무시
             i += 1
             continue
 
@@ -353,14 +376,16 @@ def parse_question_bank(path, default_chapter_num=1, default_chapter_title=""):
             # 문장 중간에 동그라미 숫자가 박힌 경우는 보기 목록이 아니라 지문으로 취급)
             if any(c in text for c in CIRCLED):
                 if _looks_like_options_line(text):
-                    parts = re.split(r"(?=[①②③④⑤⑥⑦⑧⑨⑩])", text)
-                    for part in parts:
-                        part = part.strip()
-                        if part:
-                            cur_q["options"].append(part)
+                    for part in _split_into_options(text):
+                        cur_q["options"].append(part)
                 else:
                     cur_q["raw_lines"].append(text)
                     cur_q["has_inline_markers"] = True
+            elif cur_q["options"]:
+                # 이미 선지(①~⑤) 목록이 시작된 뒤에 나오는, 동그라미 번호가 없는 줄은
+                # 새로운 지문이 아니라 직전 선지의 연속(예: '→ 변환된 문장')이다.
+                # 다음 선지 번호가 나오기 전까지는 모두 같은 선지로 합친다.
+                cur_q["options"][-1] = cur_q["options"][-1] + "<br/>" + text
             else:
                 cur_q["raw_lines"].append(text)
         elif gathering_shared:
