@@ -146,6 +146,16 @@ def parse_chapter_reference(path):
 
 
 
+def _looks_like_options_line(text):
+    """①~⑤가 있는 줄이 '진짜 보기 목록'인지, 아니면 밑줄 오류 지문처럼 문장 중간에
+    동그라미 숫자가 박혀있는 것인지 구분. 조각이 5개 초과이거나 한 조각이 지나치게
+    길면(문장형) 보기 목록이 아니라 지문으로 간주."""
+    parts = [p.strip() for p in re.split(r"(?=[①②③④⑤⑥⑦⑧⑨⑩])", text) if p.strip()]
+    if not parts or len(parts) > 5:
+        return False
+    return all(len(p.split()) <= 12 for p in parts)
+
+
 def _iter_block_items(doc):
     """문서 본문(paragraph, table)을 실제 등장 순서대로 순회"""
     body = doc.element.body
@@ -273,6 +283,7 @@ def parse_question_bank(path, default_chapter_num=1, default_chapter_title=""):
                     "tables": [],
                     "options": [],
                     "answer_marks": [],
+                    "has_inline_markers": False,
                 }
                 # 그룹 범위가 끝났으면 초기화(다음 그룹 헤더 전까지는 유지)
                 i += 1
@@ -283,13 +294,18 @@ def parse_question_bank(path, default_chapter_num=1, default_chapter_title=""):
             reds = _para_red_spans(obj)
             if reds:
                 cur_q["answer_marks"].extend(reds)
-            # 보기(①~⑤)가 한 줄에 여러 개 있을 수 있으므로 분리
+            # 보기(①~⑤)가 한 줄에 여러 개 있을 수 있으므로 분리 (단, 밑줄 오류 지문처럼
+            # 문장 중간에 동그라미 숫자가 박힌 경우는 보기 목록이 아니라 지문으로 취급)
             if any(c in text for c in CIRCLED):
-                parts = re.split(r"(?=[①②③④⑤⑥⑦⑧⑨⑩])", text)
-                for part in parts:
-                    part = part.strip()
-                    if part:
-                        cur_q["options"].append(part)
+                if _looks_like_options_line(text):
+                    parts = re.split(r"(?=[①②③④⑤⑥⑦⑧⑨⑩])", text)
+                    for part in parts:
+                        part = part.strip()
+                        if part:
+                            cur_q["options"].append(part)
+                else:
+                    cur_q["raw_lines"].append(text)
+                    cur_q["has_inline_markers"] = True
             else:
                 cur_q["raw_lines"].append(text)
         i += 1
