@@ -98,26 +98,22 @@ def build_row_fields(raw_q, answer_key_entry=None, cell_candidates=None):
     q_type, tp_type = guess_q_type_tp_type(raw_q)
     instruction = _clean(raw_q.get("instruction") or raw_q.get("shared_instruction"))
 
-    # text_passage vs text_prompt 배치:
-    # - MC + 밑줄오류(문장 속에 번호가 박힌 경우) -> 지문은 text_prompt
-    # - 그 외 -> 지문은 text_passage, <조건>/우리말 등 보조문구는 text_prompt로 남을 수 있음
-    #   (규칙만으로 완벽히 분리하기 어려워 raw_lines를 우선 text_passage에 몰아넣고 검수에 맡김)
-    joined_lines = "<br/>".join(raw_q.get("raw_lines", []))
-    if tp_type == "MC" and raw_q.get("has_inline_markers"):
-        text_passage = ""
-        text_prompt = joined_lines
-    else:
-        text_passage = joined_lines
-        text_prompt = ""
+    # text_passage: 표로 된 지문(<조건> 아닌 것) 우선.
+    # text_prompt: <조건>표, 그리고 표가 아닌 원문 라인(정답 기입란, 배열용 빈칸, 보조 조건 등).
+    # 단, 밑줄 오류 지문처럼 한 문장 안에 보기 번호(①~⑤)가 박힌 경우는 그 문장 자체가
+    # 지문이므로 text_passage로 보낸다.
+    passage_parts = list(raw_q.get("passage_tables", []))
+    prompt_parts = list(raw_q.get("prompt_tables", []))
 
-    tables = raw_q.get("tables") or []
-    image_prompt = ""
-    if tables:
-        # 표 데이터는 실제 이미지 파일을 자동 생성할 수 없으므로, 값이 유실되지 않도록
-        # text_prompt 뒤에 원문 그대로 덧붙여 검수 시 참고/수동 이미지화할 수 있게 함
-        table_note = "<br/>".join(f"[표{i+1}] {t}" for i, t in enumerate(tables))
-        text_prompt = (text_prompt + "<br/>" + table_note).strip("<br/>") if text_prompt else table_note
-        image_prompt = "[검수필요-표를 이미지로 대체 필요]"
+    joined_lines = "<br/>".join(l for l in raw_q.get("raw_lines", []) if l.strip())
+    if joined_lines:
+        if tp_type == "MC" and raw_q.get("has_inline_markers"):
+            passage_parts.append(joined_lines)
+        else:
+            prompt_parts.append(joined_lines)
+
+    text_passage = "<br/>".join(p for p in passage_parts if p)
+    text_prompt = "<br/>".join(p for p in prompt_parts if p)
 
     # Answer: 정답지 우선, 없으면 원문 빨간색 표시
     if answer_key_entry and answer_key_entry.get("answer"):
@@ -147,7 +143,7 @@ def build_row_fields(raw_q, answer_key_entry=None, cell_candidates=None):
         "image_passage": "",
         "question": instruction,
         "text_prompt": text_prompt,
-        "image_prompt": image_prompt,
+        "image_prompt": "",
         **text_examples,
         "Answer": answer,
     }

@@ -50,7 +50,48 @@ def _para_red_spans(paragraph):
     return spans
 
 
-CHAPTER_TITLE_RE = re.compile(r"^(\d{2})\s+(.*)$")
+def _run_html(run):
+    """run 하나를 텍스트로 변환하되, 밑줄 서식은 <u></u>로, 줄바꿈(w:br)은 <br/>로 표시."""
+    text = run.text
+    if not text:
+        return ""
+    text = text.replace("\t", " ").replace("\n", "<br/>")
+    if run.font.underline:
+        return f"<u>{text}</u>"
+    return text
+
+
+def _para_html(paragraph):
+    """문단 하나를 밑줄(<u>)/줄바꿈(<br/>) 표시를 보존한 문자열로 변환."""
+    return "".join(_run_html(r) for r in paragraph.runs)
+
+
+_KNOWN_TAG_RE = re.compile(r"</?u>|<br/>")
+CONDITION_MARKERS = ("<조건>", "〈조건〉", "＜조건＞")
+
+
+def _is_condition_block(html_text):
+    """표/문단 내용이 '<조건>'으로 시작하는지 (밑줄/줄바꿈 태그는 무시하고) 판단."""
+    plain = _KNOWN_TAG_RE.sub("", html_text).strip()
+    return plain.startswith(CONDITION_MARKERS)
+
+
+def _table_to_html(table):
+    """표 내용을 밑줄(<u>)/줄바꿈(<br/>) 서식을 보존해 문자열로 변환.
+    병합된 셀은 python-docx에서 같은 셀 객체가 여러 번 나오므로 중복 제거."""
+    seen_tc = set()
+    para_htmls = []
+    for row in table.rows:
+        for cell in row.cells:
+            tc_key = id(cell._tc)
+            if tc_key in seen_tc:
+                continue
+            seen_tc.add(tc_key)
+            for p in cell.paragraphs:
+                html = _para_html(p).strip()
+                if html:
+                    para_htmls.append(html)
+    return "<br/>".join(para_htmls)
 CELL_RE = re.compile(r"^CELL\s*(\d+)\s+(.*)$", re.IGNORECASE)
 
 
@@ -146,14 +187,15 @@ def parse_chapter_reference(path):
 
 
 
-def _looks_like_options_line(text):
+def _looks_like_options_line(html_text):
     """①~⑤가 있는 줄이 '진짜 보기 목록'인지, 아니면 밑줄 오류 지문처럼 문장 중간에
     동그라미 숫자가 박혀있는 것인지 구분. 조각이 5개 초과이거나 한 조각이 지나치게
-    길면(문장형) 보기 목록이 아니라 지문으로 간주."""
-    parts = [p.strip() for p in re.split(r"(?=[①②③④⑤⑥⑦⑧⑨⑩])", text) if p.strip()]
+    길면(문장형) 보기 목록이 아니라 지문으로 간주. (<u>/<br/> 태그가 섞여 있어도 동작)"""
+    parts = [p.strip() for p in re.split(r"(?=[①②③④⑤⑥⑦⑧⑨⑩])", html_text) if p.strip()]
     if not parts or len(parts) > 5:
         return False
-    return all(len(p.split()) <= 12 for p in parts)
+    plain_parts = [_KNOWN_TAG_RE.sub("", p) for p in parts]
+    return all(len(p.split()) <= 12 for p in plain_parts)
 
 
 def _iter_block_items(doc):
@@ -166,13 +208,6 @@ def _iter_block_items(doc):
         elif child.tag == qn("w:tbl"):
             from docx.table import Table
             yield "tbl", Table(child, doc)
-
-
-def _table_to_tsv(table):
-    rows = []
-    for row in table.rows:
-        rows.append(" | ".join(c.text.strip().replace("\n", " ") for c in row.cells))
-    return "\n".join(rows)
 
 
 QNUM_RE = re.compile(r"^(\d{1,2})(?:\s+(.*))?$")
@@ -194,12 +229,15 @@ def parse_question_bank(path, default_chapter_num=1, default_chapter_title=""):
         "q_num": int,
         "group_range": (start,end) or None,
         "shared_instruction": str or "",   # [08-09] 같은 그룹 공통 지시문
-        "instruction": str,                # 문항 지시문(질문)
-        "raw_lines": [str, ...],           # 지문/보기/조건 등 원문 라인(순서 보존)
-        "tables": [tsv_str, ...],
-        "options": [str, ...],             # ①~⑤ 보기 (있는 경우)
+        "instruction": str,                # 문항 지시문(질문) - 밑줄(<u>) 보존
+        "raw_lines": [str, ...],           # 지문/보기 외 원문 라인(순서 보존, <u>/<br/> 보존)
+        "passage_tables": [html_str, ...], # 표로 된 지문(<조건>이 아닌 것) - text_passage로 감
+        "prompt_tables": [html_str, ...],  # <조건>으로 시작하는 표 - text_prompt로 감
+        "options": [str, ...],             # ①~⑤ 보기 (있는 경우, <u> 보존)
         "answer_marks": [str, ...],        # 빨간색으로 표시된 원문(정답 후보)
       }
+    같은 그룹([N-M])에 속한 문항들은 그룹 헤더와 첫 문항 사이에 등장하는 공용 지문
+    (표 또는 문단)을 각자 복사해서 가진다 (예: [11-12] 공용 지문 -> 11번, 12번 모두 포함).
     파싱은 휴리스틱이므로 반드시 Streamlit UI에서 사람이 검수해야 함.
     """
     doc = Document(path)
@@ -214,6 +252,12 @@ def parse_question_bank(path, default_chapter_num=1, default_chapter_title=""):
     cur_group_range = None
     cur_shared_instruction = ""
 
+    # 그룹 헤더 이후 ~ 첫 문항 이전에 등장하는 공용 지문(그룹 내 모든 문항에 복사됨)
+    gathering_shared = False
+    shared_lines = []
+    shared_passage_tables = []
+    shared_prompt_tables = []
+
     def flush():
         if cur_q is not None:
             questions.append(cur_q)
@@ -222,20 +266,26 @@ def parse_question_bank(path, default_chapter_num=1, default_chapter_title=""):
     n = len(items)
     while i < n:
         kind, obj = items[i]
+
         if kind == "tbl":
-            tsv = _table_to_tsv(obj)
-            if cur_q is not None:
-                cur_q["tables"].append(tsv)
+            html = _table_to_html(obj)
+            if html:
+                is_cond = _is_condition_block(html)
+                if cur_q is not None:
+                    (cur_q["prompt_tables"] if is_cond else cur_q["passage_tables"]).append(html)
+                elif gathering_shared:
+                    (shared_prompt_tables if is_cond else shared_passage_tables).append(html)
+                # 그 외(문항/그룹 문맥 밖의 표: 목차 등)는 무시
             i += 1
             continue
 
-        text = obj.text.strip()
+        text = _para_html(obj).strip()
         if not text:
             i += 1
             continue
 
         # 챕터 헤더: 'Chapter' 단독 문단 다음에 '01  제목'
-        if text.lower() == "chapter":
+        if _KNOWN_TAG_RE.sub("", text).lower() == "chapter":
             expecting_chapter_title = True
             i += 1
             continue
@@ -245,9 +295,11 @@ def parse_question_bank(path, default_chapter_num=1, default_chapter_title=""):
                 flush()
                 cur_q = None
                 cur_chapter_num = int(m.group(1))
-                cur_chapter_title = m.group(2).strip()
+                cur_chapter_title = _KNOWN_TAG_RE.sub("", m.group(2)).strip()
                 expecting_chapter_title = False
                 cur_shared_instruction = ""
+                gathering_shared = False
+                shared_lines, shared_passage_tables, shared_prompt_tables = [], [], []
                 i += 1
                 continue
             expecting_chapter_title = False  # 예상과 다르면 무시하고 계속 진행
@@ -259,6 +311,8 @@ def parse_question_bank(path, default_chapter_num=1, default_chapter_title=""):
             cur_q = None
             cur_group_range = (int(m_range.group(1)), int(m_range.group(2)))
             cur_shared_instruction = m_range.group(3).strip()
+            gathering_shared = True
+            shared_lines, shared_passage_tables, shared_prompt_tables = [], [], []
             i += 1
             continue
 
@@ -279,17 +333,18 @@ def parse_question_bank(path, default_chapter_num=1, default_chapter_title=""):
                     "group_range": cur_group_range if in_group else None,
                     "shared_instruction": cur_shared_instruction if in_group else "",
                     "instruction": rest,
-                    "raw_lines": [],
-                    "tables": [],
+                    "raw_lines": list(shared_lines) if in_group else [],
+                    "passage_tables": list(shared_passage_tables) if in_group else [],
+                    "prompt_tables": list(shared_prompt_tables) if in_group else [],
                     "options": [],
                     "answer_marks": [],
                     "has_inline_markers": False,
                 }
-                # 그룹 범위가 끝났으면 초기화(다음 그룹 헤더 전까지는 유지)
+                gathering_shared = False  # 이후 내용은 이 문항 전용(공용 지문 수집은 종료)
                 i += 1
                 continue
 
-        # 그 외 줄: 현재 문항에 귀속
+        # 그 외 줄
         if cur_q is not None:
             reds = _para_red_spans(obj)
             if reds:
@@ -308,6 +363,9 @@ def parse_question_bank(path, default_chapter_num=1, default_chapter_title=""):
                     cur_q["has_inline_markers"] = True
             else:
                 cur_q["raw_lines"].append(text)
+        elif gathering_shared:
+            # 그룹 헤더 이후, 첫 문항 전에 나오는 공용 지문 문단(표가 아닌 경우)
+            shared_lines.append(text)
         i += 1
 
     flush()

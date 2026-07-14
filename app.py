@@ -213,6 +213,11 @@ if st.session_state.answer_key:
 
 # ================= STEP 3: 검수 & 편집 =================
 st.header("3️⃣ 검수 및 편집")
+st.caption(
+    "⚠️ cell_id/cell_title은 문서 안에 문항별 CELL 표시가 없어 자동 판단하지 않습니다. "
+    "아래 표의 'cell_id 후보(참고용)' 컬럼에서 해당 챕터의 CELL 후보를 확인하고, cell_id/cell_title 칸에 "
+    "직접 골라 입력해주세요."
+)
 if st.session_state.raw_questions:
     enriched = build_all(st.session_state.raw_questions, answer_key=st.session_state.answer_key)
 
@@ -222,18 +227,35 @@ if st.session_state.raw_questions:
         row["page_order_seq"] = e.get("q_num")
         for col in VARYING_FIELDS:
             row[col] = e.get(col, "")
+        cands = candidates_by_chapter.get(e.get("chapter_num"), [])
+        row["_cell_id_candidates"] = (
+            " | ".join(f"{cid} ({title})" for cid, title in cands) if cands else ""
+        )
         final_rows.append(row)
 
     df = pd.DataFrame(final_rows)
     for col in TARGET_COLUMNS:
         if col not in df.columns:
             df[col] = ""
-    df = df[TARGET_COLUMNS]
-    edited_df = st.data_editor(df, width="stretch", height=500, num_rows="dynamic")
+
+    display_columns = list(TARGET_COLUMNS)
+    insert_at = display_columns.index("cell_id") + 1 if "cell_id" in display_columns else 0
+    display_columns.insert(insert_at, "_cell_id_candidates")
+    df = df[display_columns]
+
+    edited_df = st.data_editor(
+        df, width="stretch", height=500, num_rows="dynamic",
+        column_config={
+            "_cell_id_candidates": st.column_config.TextColumn(
+                "cell_id 후보 (참고용 - 엑셀에는 포함되지 않음)", disabled=True, width="large",
+            ),
+        },
+    )
 
     st.header("4️⃣ 엑셀로 내보내기")
+    export_df = edited_df[TARGET_COLUMNS]
     buf = io.BytesIO()
-    edited_df.to_excel(buf, index=False, engine="openpyxl")
+    export_df.to_excel(buf, index=False, engine="openpyxl")
     buf.seek(0)
     st.download_button(
         "⬇️ 엑셀 다운로드",
