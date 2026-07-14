@@ -158,6 +158,7 @@ def build_all(raw_questions, answer_key=None):
         entry = answer_key.get(ch, {}).get(rq.get("q_num"))
         data = build_row_fields(rq, answer_key_entry=entry)
         data["chapter_num"] = ch
+        data["chapter_title"] = rq.get("chapter_title", "")
         data["q_num"] = rq.get("q_num")
         results.append(data)
     return results

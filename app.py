@@ -133,9 +133,11 @@ with st.sidebar:
     st.header("⚙️ 설정")
     st.subheader("공통 메타데이터 (내장 템플릿에서 자동 채워짐, 수정 가능)")
     meta = st.session_state.lesson_meta_by_level[level_code]
-    meta_keys = [c for c in TARGET_COLUMNS if c not in VARYING_FIELDS and c != "page_order_seq"]
+    meta_keys = [c for c in TARGET_COLUMNS if c not in VARYING_FIELDS and c not in ("page_order_seq", "lesson_title")]
     for k in meta_keys:
         meta[k] = st.text_input(k, value=str(meta.get(k, "")))
+    st.caption("💡 lesson_title(챕터명)은 문항마다 속한 챕터에 맞춰 자동으로 채워지며, "
+               "3️⃣ 검수 화면의 표에서 행별로 직접 수정할 수 있습니다.")
     if st.button("💾 이 값 저장(재사용)"):
         with open(CONFIG_PATH, "w", encoding="utf-8") as f:
             json.dump(meta, f, ensure_ascii=False, indent=2)
@@ -225,9 +227,11 @@ if st.session_state.raw_questions:
     for e in enriched:
         row = dict(meta)
         row["page_order_seq"] = e.get("q_num")
+        ch_num = e.get("chapter_num")
+        row["lesson_title"] = e.get("chapter_title") or chapter_ref.get(ch_num, {}).get("title", "")
         for col in VARYING_FIELDS:
             row[col] = e.get(col, "")
-        cands = candidates_by_chapter.get(e.get("chapter_num"), [])
+        cands = candidates_by_chapter.get(ch_num, [])
         row["_cell_id_candidates"] = (
             " | ".join(f"{cid} ({title})" for cid, title in cands) if cands else ""
         )
